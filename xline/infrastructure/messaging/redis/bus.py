@@ -493,6 +493,15 @@ class RedisEventBus:
             logger.error("Error closing event bus", error=str(e))
             raise EventBusError(f"Close failed: {e}") from e
 
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+
 
 # Alias for EventBusInterface compatibility
 RedisEventBusInterface = RedisEventBus

@@ -28,6 +28,11 @@ try:
 except ImportError:
     orjson = None  # type: ignore[assignment]
 
+try:
+    import msgpack
+except ImportError:
+    msgpack = None  # type: ignore[assignment]
+
 
 class SerializationError(EventBusError):
     """Exception raised when serialization/deserialization fails."""
@@ -169,13 +174,11 @@ class MsgPackSerializer(Serializer):
 
     def __init__(self) -> None:
         """Initialize MessagePack serializer."""
-        try:
-            import msgpack
-            self._msgpack = msgpack
-        except ImportError:
+        if msgpack is None:
             raise SerializationError(
                 "msgpack library not installed. Install with: pip install msgpack"
             )
+        self._msgpack = msgpack
 
     def dumps(self, envelope: Envelope) -> bytes:
         """Serialize envelope to MessagePack bytes."""

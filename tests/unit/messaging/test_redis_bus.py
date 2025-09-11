@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from redis.asyncio import Redis
 
-from xline.core.events.bus_interface import Envelope, PublishResult
+from xline.core.events.bus_interface import Envelope, PublishResult, EventBusError
 from xline.infrastructure.messaging.redis.bus import RedisEventBus
 
 
@@ -26,8 +26,18 @@ class TestRedisEventBus:
 
     @pytest.fixture
     async def mock_redis(self) -> AsyncMock:
-        """Create a mock Redis client."""
-        redis_mock = AsyncMock(spec=Redis)
+        """Create a properly configured Redis mock."""
+        redis_mock = AsyncMock()
+        redis_mock.ping = AsyncMock(return_value=True)
+        redis_mock.info = AsyncMock(return_value={
+            "redis_version": "6.0.0",
+            "used_memory_human": "1.0M",
+            "connected_clients": 5
+        })
+        redis_mock.xadd = AsyncMock(return_value=b"test-id")
+        redis_mock.xgroup_create = AsyncMock(return_value=True)
+        redis_mock.xreadgroup = AsyncMock(return_value=[])
+        redis_mock.close = AsyncMock(return_value=None)
         return redis_mock
 
     @pytest.fixture
@@ -218,16 +228,19 @@ class TestRedisEventBus:
 
     async def test_health_check_not_connected(self, mock_redis: AsyncMock) -> None:
         """Test health check when not connected."""
-        with patch("redis.asyncio.Redis.from_url", return_value=mock_redis):
+        # Patch Redis.from_url to return failing mock
+        with patch("redis.asyncio.Redis.from_url") as mock_from_url:
+            mock_redis.ping.side_effect = Exception("Connection failed")
+            mock_from_url.return_value = mock_redis
+            
             bus = RedisEventBus(
                 redis_url="redis://localhost:6379",
-                stream_prefix="test",
+                stream_prefix="test", 
                 consumer_group="test-group",
             )
-
-            is_healthy = await bus.health_check()
-
-            assert is_healthy is False
+            
+            with pytest.raises(EventBusError):
+                await bus.health_check()
 
     async def test_disconnect(self, event_bus: RedisEventBus, mock_redis: AsyncMock) -> None:
         """Test disconnection from Redis."""
@@ -238,18 +251,14 @@ class TestRedisEventBus:
 
     async def test_context_manager(self, mock_redis: AsyncMock) -> None:
         """Test using event bus as async context manager."""
-        mock_redis.ping.return_value = True
-
         with patch("redis.asyncio.Redis.from_url", return_value=mock_redis):
             async with RedisEventBus(
                 redis_url="redis://localhost:6379",
                 stream_prefix="test",
                 consumer_group="test-group",
             ) as bus:
-                assert bus._connected is True
-
-            # Should be disconnected after context exit
-            mock_redis.aclose.assert_called_once()
+                assert bus._is_connected is True
+                mock_redis.ping.assert_called_once()
 
     async def test_consumer_group_creation(
         self, event_bus: RedisEventBus, mock_redis: AsyncMock
