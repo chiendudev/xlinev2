@@ -1000,16 +1000,20 @@ class IFreqaiModel(ABC):
         )
         dk.feature_pipeline = self.define_data_pipeline(threads=dk.thread_count)
         dd = dk.data_dictionary
-        (dd["train_features"], dd["train_labels"], dd["train_weights"]) = (
-            dk.feature_pipeline.fit_transform(
-                dd["train_features"], dd["train_labels"], dd["train_weights"]
-            )
+        (
+            dd["train_features"],
+            dd["train_labels"],
+            dd["train_weights"],
+        ) = dk.feature_pipeline.fit_transform(
+            dd["train_features"], dd["train_labels"], dd["train_weights"]
         )
 
-        (dd["test_features"], dd["test_labels"], dd["test_weights"]) = (
-            dk.feature_pipeline.transform(
-                dd["test_features"], dd["test_labels"], dd["test_weights"]
-            )
+        (
+            dd["test_features"],
+            dd["test_labels"],
+            dd["test_weights"],
+        ) = dk.feature_pipeline.transform(
+            dd["test_features"], dd["test_labels"], dd["test_weights"]
         )
 
         dk.label_pipeline = self.define_label_pipeline(threads=dk.thread_count)

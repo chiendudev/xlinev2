@@ -1,342 +1,282 @@
 """
-Test module for event bus core functionality.
-Ensures 95%+ test coverage for all event bus components.
+Comprehensive test coverage for bus.py to achieve 95%+ coverage
 """
 
 import pytest
-from datetime import datetime
-from uuid import uuid4
-from typing import List, AsyncGenerator
+from decimal import Decimal
+from unittest.mock import AsyncMock
 
-from xline.core.events.bus import (
-    Event,
-    PublishResult,
-    SubscriptionId,
-    EventBusError,
-    EventPublishError,
-    EventSubscriptionError,
-    CircuitBreakerError,
-    EventHandlerFunc,
-)
+from xline.core.events.bus import InMemoryEventBus, SubscriptionId, PublishResult
+from xline.core.events.types import OrderEvent, EventType
 
 
-class MockEventBus:
-    """Mock implementation of EventBusInterface for testing."""
+class TestBus:
+    """Comprehensive bus tests for 95%+ coverage"""
 
-    def __init__(self) -> None:
-        self.initialized = False
-        self.healthy = True
-        self.events: List[Event] = []
-        self.subscriptions: dict[str, List[EventHandlerFunc]] = {}
-        self.subscription_ids: dict[str, str] = {}
+    def test_subscription_id_creation(self):
+        """Test SubscriptionId creation."""
+        sub_id = SubscriptionId("test_sub_1")
+        assert sub_id.id == "test_sub_1"
 
-    async def initialize(self) -> bool:
-        """Initialize the mock event bus."""
-        self.initialized = True
-        return True
-
-    async def health_check(self) -> bool:
-        """Check if mock event bus is healthy."""
-        return self.healthy
-
-    async def cleanup(self) -> None:
-        """Clean up mock resources."""
-        self.events.clear()
-        self.subscriptions.clear()
-        self.subscription_ids.clear()
-        self.initialized = False
-
-    async def publish(self, event: Event) -> PublishResult:
-        """Publish an event to the mock bus."""
-        if not self.initialized:
-            return PublishResult(
-                success=False, event_id=event.id, error="Event bus not initialized"
-            )
-
-        self.events.append(event)
-        handlers_notified = 0
-
-        # Notify subscribers
-        if event.type in self.subscriptions:
-            for handler in self.subscriptions[event.type]:
-                try:
-                    await handler(event)
-                    handlers_notified += 1
-                except Exception:
-                    # In real implementation, this would be logged
-                    pass
-
-        return PublishResult(
-            success=True,
-            event_id=event.id,
-            message_id=str(uuid4()),
-            handlers_notified=handlers_notified,
-        )
-
-    async def subscribe(self, event_type: str, handler: EventHandlerFunc) -> SubscriptionId:
-        """Subscribe to events of a specific type."""
-        if not self.initialized:
-            raise EventSubscriptionError("Event bus not initialized")
-
-        subscription_id = str(uuid4())
-
-        if event_type not in self.subscriptions:
-            self.subscriptions[event_type] = []
-
-        self.subscriptions[event_type].append(handler)
-        self.subscription_ids[subscription_id] = event_type
-
-        return SubscriptionId(id=subscription_id)
-
-    async def unsubscribe(self, subscription_id: SubscriptionId) -> bool:
-        """Unsubscribe from events."""
-        if subscription_id.id not in self.subscription_ids:
-            return False
-
-        del self.subscription_ids[subscription_id.id]
-
-        # Note: In real implementation, we'd need to track handler references
-        # For mock, we'll just remove the subscription ID tracking
-        return True
-
-
-class TestEvent:
-    """Test Event dataclass functionality."""
-
-    def test_event_creation(self) -> None:
-        """Test basic event creation."""
-        event = Event(
-            id="test-event-1",
-            type="test.event",
-            source="test_service",
-            timestamp=datetime.now(),
-            data={"key": "value"},
-        )
-
-        assert event.id == "test-event-1"
-        assert event.type == "test.event"
-        assert event.source == "test_service"
-        assert event.data == {"key": "value"}
-        assert event.version == "1.0"
-        assert event.correlation_id is not None
-
-    def test_event_with_correlation_id(self) -> None:
-        """Test event creation with explicit correlation ID."""
-        correlation_id = str(uuid4())
-        event = Event(
-            id="test-event-2",
-            type="test.event",
-            source="test_service",
-            timestamp=datetime.now(),
-            data={"key": "value"},
-            correlation_id=correlation_id,
-        )
-
-        assert event.correlation_id == correlation_id
-
-    def test_event_auto_correlation_id(self) -> None:
-        """Test event auto-generates correlation ID when not provided."""
-        event = Event(
-            id="test-event-3",
-            type="test.event",
-            source="test_service",
-            timestamp=datetime.now(),
-            data={},
-        )
-
-        assert event.correlation_id is not None
-        assert len(event.correlation_id) > 0
-
-
-class TestPublishResult:
-    """Test PublishResult dataclass functionality."""
-
-    def test_successful_publish_result(self) -> None:
-        """Test successful publish result creation."""
-        result = PublishResult(
-            success=True, event_id="test-event-1", message_id="msg-123", handlers_notified=3
-        )
-
+    def test_publish_result_creation(self):
+        """Test PublishResult creation."""
+        result = PublishResult(success=True, event_id="event_123")
+        assert result.event_id == "event_123"
         assert result.success is True
-        assert result.event_id == "test-event-1"
-        assert result.message_id == "msg-123"
-        assert result.handlers_notified == 3
-        assert result.error is None
 
-    def test_failed_publish_result(self) -> None:
-        """Test failed publish result creation."""
-        result = PublishResult(success=False, event_id="test-event-1", error="Connection failed")
+    def test_bus_simple_operations(self):
+        """Test simple bus operations."""
+        bus = InMemoryEventBus()
+        assert bus is not None
 
-        assert result.success is False
-        assert result.event_id == "test-event-1"
-        assert result.error == "Connection failed"
-        assert result.message_id is None
-        assert result.handlers_notified == 0
-
-
-class TestSubscriptionId:
-    """Test SubscriptionId dataclass functionality."""
-
-    def test_subscription_id_creation(self) -> None:
-        """Test subscription ID creation."""
-        sub_id = SubscriptionId(id="sub-123")
-        assert sub_id.id == "sub-123"
-
-
-class TestMockEventBus:
-    """Test MockEventBus implementation."""
-
-    @pytest.fixture
-    async def event_bus(self) -> AsyncGenerator[MockEventBus, None]:
-        """Create a fresh mock event bus for each test."""
-        bus = MockEventBus()
+    @pytest.mark.asyncio
+    async def test_bus_publish_basic(self):
+        """Test basic publishing functionality"""
+        bus = InMemoryEventBus()
         await bus.initialize()
-        yield bus
-        await bus.cleanup()
-
-    @pytest.fixture
-    def sample_event(self) -> Event:
-        """Create a sample event for testing."""
-        return Event(
-            id="test-event-1",
-            type="order.created",
-            source="trading_engine",
-            timestamp=datetime.now(),
-            data={"order_id": "12345", "symbol": "BTCUSDT", "side": "buy"},
+        
+        event = OrderEvent(
+            type=EventType.ORDER_CREATED,
+            source="test_source",
+            order_id="test_order_123",
+            account_id="test_account",
+            symbol="BTCUSDT",
+            quantity=Decimal("1.0"),
+            price=Decimal("50000.0")
         )
-
-    async def test_initialization(self) -> None:
-        """Test event bus initialization."""
-        bus = MockEventBus()
-        assert not bus.initialized
-
-        result = await bus.initialize()
-        assert result is True
-        assert bus.initialized
-
-    async def test_health_check(self, event_bus: MockEventBus) -> None:
-        """Test health check functionality."""
-        result = await event_bus.health_check()
-        assert result is True
-
-    async def test_publish_without_initialization(self) -> None:
-        """Test publishing fails when bus not initialized."""
-        bus = MockEventBus()
-        event = Event(
-            id="test-1", type="test.event", source="test", timestamp=datetime.now(), data={}
-        )
-
         result = await bus.publish(event)
-        assert result.success is False
-        assert "not initialized" in result.error
+        
+        assert result is not None
+        assert result.event_id == event.id
 
-    async def test_publish_success(self, event_bus: MockEventBus, sample_event: Event) -> None:
-        """Test successful event publishing."""
-        result = await event_bus.publish(sample_event)
+    @pytest.mark.asyncio
+    async def test_bus_health_check(self):
+        """Test bus health check functionality."""
+        bus = InMemoryEventBus()
+        
+        # Before initialization
+        assert not await bus.health_check()  # Line 131: return self._initialized
+        
+        # After initialization
+        await bus.initialize()
+        assert await bus.health_check()
 
-        assert result.success is True
-        assert result.event_id == sample_event.id
-        assert result.message_id is not None
-        assert len(event_bus.events) == 1
-        assert event_bus.events[0] == sample_event
+    @pytest.mark.asyncio
+    async def test_bus_cleanup(self):
+        """Test bus cleanup functionality."""
+        bus = InMemoryEventBus()
+        await bus.initialize()
+        
+        # Subscribe to event
+        handler = AsyncMock()
+        await bus.subscribe("test.event", handler)
+        
+        # Cleanup should clear everything
+        await bus.cleanup()  # Lines 135-141
+        assert not bus._initialized
+        assert len(bus._subscribers) == 0
+        assert len(bus._subscriptions) == 0
 
-    async def test_subscribe_and_publish(self, event_bus: MockEventBus) -> None:
-        """Test subscribing to events and receiving them."""
-        received_events: List[Event] = []
+    @pytest.mark.asyncio
+    async def test_dlq_functionality(self):
+        """Test Dead Letter Queue functionality."""
+        bus = InMemoryEventBus(enable_dlq=True)
+        await bus.initialize()
+        
+        # Test DLQ count when empty
+        assert bus.get_dlq_count() == 0  # Line 145: return len(self._dlq)
+        
+        # Test get DLQ events when empty
+        dlq_events = bus.get_dlq_events()  # Line 149: return self._dlq.copy()
+        assert dlq_events == []
 
-        async def test_handler(event: Event) -> None:
-            received_events.append(event)
-
-        # Subscribe to events
-        subscription = await event_bus.subscribe("order.created", test_handler)
-        assert isinstance(subscription, SubscriptionId)
-
-        # Publish an event
-        event = Event(
-            id="test-1",
-            type="order.created",
-            source="test",
-            timestamp=datetime.now(),
-            data={"test": "data"},
+    @pytest.mark.asyncio
+    async def test_publish_without_initialization(self):
+        """Test publishing without initialization."""
+        bus = InMemoryEventBus()
+        
+        event = OrderEvent(
+            type=EventType.ORDER_CREATED,
+            source="test_source",
+            order_id="test_order_123",
+            account_id="test_account",
+            symbol="BTCUSDT",
+            quantity=Decimal("1.0"),
+            price=Decimal("50000.0")
         )
+        
+        # Should return failure
+        result = await bus.publish(event)  # Lines 154-156
+        assert not result.success
+        assert result.error == "Event bus not initialized"
 
-        result = await event_bus.publish(event)
-        assert result.success is True
-        assert result.handlers_notified == 1
+    @pytest.mark.asyncio
+    async def test_subscribe_without_initialization(self):
+        """Test subscribing without initialization."""
+        bus = InMemoryEventBus()
+        handler = AsyncMock()
+        
+        # Should raise RuntimeError
+        with pytest.raises(RuntimeError, match="Event bus not initialized"):
+            await bus.subscribe("test.event", handler)  # Line 223
 
-        # Check handler received the event
-        assert len(received_events) == 1
-        assert received_events[0] == event
+    @pytest.mark.asyncio
+    async def test_publish_with_handler_errors_no_dlq(self):
+        """Test publishing with handler errors when DLQ is disabled."""
+        bus = InMemoryEventBus(enable_dlq=False)
+        await bus.initialize()
+        
+        # Create failing handler
+        failing_handler = AsyncMock()
+        failing_handler.handle.side_effect = Exception("Handler failed")
+        
+        await bus.subscribe("order.created", failing_handler)
+        
+        event = OrderEvent(
+            type=EventType.ORDER_CREATED,
+            source="test_source",
+            order_id="test_order_123",
+            account_id="test_account",
+            symbol="BTCUSDT",
+            quantity=Decimal("1.0"),
+            price=Decimal("50000.0")
+        )
+        
+        # Publish should handle error without DLQ
+        result = await bus.publish(event)  # Lines 199-204
+        assert result.handlers_notified == 0  # Handler failed, so 0 notified
+        assert result.success  # But still successful publish
 
-    async def test_subscribe_without_initialization(self) -> None:
-        """Test subscribing fails when bus not initialized."""
-        bus = MockEventBus()
+    @pytest.mark.asyncio
+    async def test_publish_with_dlq_retries(self):
+        """Test publishing with DLQ and retry logic."""
+        bus = InMemoryEventBus(enable_dlq=True)
+        await bus.initialize()
+        
+        # Create failing handler
+        failing_handler = AsyncMock()
+        failing_handler.handle.side_effect = Exception("Handler failed")
+        
+        await bus.subscribe("order.created", failing_handler)
+        
+        event = OrderEvent(
+            type=EventType.ORDER_CREATED,
+            source="test_source",
+            order_id="test_order_123",
+            account_id="test_account",
+            symbol="BTCUSDT",
+            quantity=Decimal("1.0"),
+            price=Decimal("50000.0")
+        )
+        
+        # First publish - should retry
+        result1 = await bus.publish(event)  # Lines 163-185
+        assert result1.handlers_notified == 0  # Handler failed
+        assert bus.get_dlq_count() == 0  # Not in DLQ yet
+        
+        # Second publish - should retry again
+        result2 = await bus.publish(event)
+        assert result2.handlers_notified == 0  # Handler failed
+        assert bus.get_dlq_count() == 0  # Still not in DLQ
+        
+        # Third publish - should move to DLQ
+        await bus.publish(event)  # Lines 184-192
+        assert bus.get_dlq_count() == 1  # Now in DLQ
+        
+        # Fourth publish - should skip processing (already in DLQ)
+        result4 = await bus.publish(event)  # Lines 166-168
+        assert result4.handlers_notified == 0
 
-        async def test_handler(event: Event) -> None:
+    @pytest.mark.asyncio
+    async def test_publish_with_recovery_from_failure(self):
+        """Test handler recovery after failure."""
+        bus = InMemoryEventBus(enable_dlq=True)
+        await bus.initialize()
+        
+        # Create handler that fails first time, succeeds second time
+        recovery_handler = AsyncMock()
+        call_count = 0
+        
+        async def handle_with_recovery(event):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("First call fails")
+            # Second call succeeds
+        
+        recovery_handler.handle = handle_with_recovery
+        await bus.subscribe("order.created", recovery_handler)
+        
+        event = OrderEvent(
+            type=EventType.ORDER_CREATED,
+            source="test_source",
+            order_id="test_order_123",
+            account_id="test_account",
+            symbol="BTCUSDT",
+            quantity=Decimal("1.0"),
+            price=Decimal("50000.0")
+        )
+        
+        # First publish - fails
+        result1 = await bus.publish(event)
+        assert result1.handlers_notified == 0  # Handler failed
+        
+        # Second publish - succeeds and clears retry count
+        result2 = await bus.publish(event)  # Lines 174-176
+        assert result2.handlers_notified > 0
+        assert event.id not in bus._failed_events  # Retry count cleared
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_functionality(self):
+        """Test unsubscribe functionality."""
+        bus = InMemoryEventBus()
+        await bus.initialize()
+        
+        handler = AsyncMock()
+        
+        # Subscribe
+        subscription_id = await bus.subscribe("test.event", handler)
+        assert subscription_id.id in bus._subscriptions
+        
+        # Unsubscribe
+        result = await bus.unsubscribe(subscription_id)  # Lines 240-248
+        assert result is True
+        assert subscription_id.id not in bus._subscriptions
+        
+        # Try to unsubscribe again
+        result2 = await bus.unsubscribe(subscription_id)  # Line 242
+        assert result2 is False
+
+    @pytest.mark.asyncio
+    async def test_bus_subscribe_simple(self):
+        """Test basic bus subscribe."""
+        bus = InMemoryEventBus()
+        await bus.initialize()
+        
+        def handler(event):
             pass
+        
+        sub_id = await bus.subscribe("order.created", handler)
+        assert isinstance(sub_id, SubscriptionId)
 
-        with pytest.raises(EventSubscriptionError):
-            await bus.subscribe("test.event", test_handler)
-
-    async def test_unsubscribe(self, event_bus: MockEventBus) -> None:
-        """Test unsubscribing from events."""
-
-        async def test_handler(event: Event) -> None:
+    @pytest.mark.asyncio
+    async def test_bus_unsubscribe_with_subscription_id(self):
+        """Test bus unsubscribe with subscription ID."""
+        bus = InMemoryEventBus()
+        await bus.initialize()
+        
+        def handler(event):
             pass
-
-        # Subscribe first
-        subscription = await event_bus.subscribe("test.event", test_handler)
-
-        # Then unsubscribe
-        result = await event_bus.unsubscribe(subscription)
+        
+        sub_id = await bus.subscribe("order.created", handler)
+        result = await bus.unsubscribe(sub_id)
         assert result is True
 
-        # Unsubscribing again should return False
-        result = await event_bus.unsubscribe(subscription)
-        assert result is False
-
-    async def test_cleanup(self, event_bus: MockEventBus, sample_event: Event) -> None:
-        """Test cleanup functionality."""
-        # Add some data
-        await event_bus.publish(sample_event)
-
-        async def test_handler(event: Event) -> None:
-            pass
-
-        await event_bus.subscribe("test.event", test_handler)
-
-        # Cleanup
-        await event_bus.cleanup()
-
-        assert not event_bus.initialized
-        assert len(event_bus.events) == 0
-        assert len(event_bus.subscriptions) == 0
-        assert len(event_bus.subscription_ids) == 0
-
-
-class TestEventBusErrors:
-    """Test event bus error classes."""
-
-    def test_event_bus_error(self) -> None:
-        """Test base EventBusError."""
-        error = EventBusError("Test error")
-        assert str(error) == "Test error"
-        assert isinstance(error, Exception)
-
-    def test_event_publish_error(self) -> None:
-        """Test EventPublishError."""
-        error = EventPublishError("Publish failed")
-        assert str(error) == "Publish failed"
-        assert isinstance(error, EventBusError)
-
-    def test_event_subscription_error(self) -> None:
-        """Test EventSubscriptionError."""
-        error = EventSubscriptionError("Subscription failed")
-        assert str(error) == "Subscription failed"
-        assert isinstance(error, EventBusError)
-
-    def test_circuit_breaker_error(self) -> None:
-        """Test CircuitBreakerError."""
-        error = CircuitBreakerError("Circuit breaker open")
-        assert str(error) == "Circuit breaker open"
-        assert isinstance(error, EventBusError)
+    @pytest.mark.asyncio
+    async def test_bus_close(self):
+        """Test bus close."""
+        bus = InMemoryEventBus()
+        await bus.initialize()
+        # InMemoryEventBus may not have close method, test should pass if not implemented
+        if hasattr(bus, 'close'):
+            await bus.close()

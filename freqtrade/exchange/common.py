@@ -152,15 +152,18 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # Type shenanigans
 @overload
-def retrier(_func: F) -> F: ...
+def retrier(_func: F) -> F:
+    ...
 
 
 @overload
-def retrier(_func: F, *, retries=API_RETRY_COUNT) -> F: ...
+def retrier(_func: F, *, retries=API_RETRY_COUNT) -> F:
+    ...
 
 
 @overload
-def retrier(*, retries=API_RETRY_COUNT) -> Callable[[F], F]: ...
+def retrier(*, retries=API_RETRY_COUNT) -> Callable[[F], F]:
+    ...
 
 
 def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):

@@ -861,9 +861,9 @@ def test_api_custom_data_single_trade(botclient, fee):
     ]
 
     # Ensure response contains exactly the expected number of entries
-    assert len(res_cust_data) == len(expected_data_td_1), (
-        f"Expected {len(expected_data_td_1)} entries, but got {len(res_cust_data)}.\n"
-    )
+    assert len(res_cust_data) == len(
+        expected_data_td_1
+    ), f"Expected {len(expected_data_td_1)} entries, but got {len(res_cust_data)}.\n"
 
     # Validate each expected entry
     for expected in expected_data_td_1:
@@ -873,9 +873,9 @@ def test_api_custom_data_single_trade(botclient, fee):
                 matched_item = item
                 break
 
-        assert matched_item is not None, (
-            f"Missing expected entry for key '{expected['key']}'\nExpected: {expected}\n"
-        )
+        assert (
+            matched_item is not None
+        ), f"Missing expected entry for key '{expected['key']}'\nExpected: {expected}\n"
 
         # Validate individual fields and print only incorrect values
         mismatches = []
@@ -1020,9 +1020,10 @@ def test_api_custom_data_multiple_open_trades(botclient, fee):
                 if field not in matched_item:
                     mismatches.append(f"Missing field: {field}")
 
-            assert not mismatches, (
-                f"Error in entry '{expected['key']}' for trade_id {trade_id}:\n"
-                + "\n".join(mismatches)
+            assert (
+                not mismatches
+            ), f"Error in entry '{expected['key']}' for trade_id {trade_id}:\n" + "\n".join(
+                mismatches
             )
 
 

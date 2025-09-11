@@ -1,0 +1,811 @@
+"""
+Test module for Redis Event Bus implementation.
+Comprehensive tests with mocking for Redis operations.
+"""
+
+import json
+from datetime import datetime
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+import pytest
+import redis.asyncio as redis
+
+from xline.core.events.bus import Event, EventSubscriptionError, PublishResult, SubscriptionId
+from xline.core.reliability.circuit_breaker import CircuitBreakerError
+from xline.infrastructure.messaging.redis.bus import (
+    RedisConnectionError,
+    RedisEventBus,
+    RedisSerializationError,
+)
+
+
+class TestRedisEventBus:
+    """Test Redis Event Bus implementation."""
+
+    @pytest.fixture
+    def red        # Mock DLQ behavior - return True to trigger DLQ move
+        with patch.object(event_bus, "_should_move_to_dlq", return_value=True), \
+             patch.object(event_bus, "_move_to_dlq") as mock_move_dlq, \
+             patch("redis.asyncio.from_url", return_value=mock_redis):rl(self) -> str:
+        """Redis URL for testing."""
+        return "redis://localhost:6379/0"
+
+    @pytest.fixture
+    def event_bus(self, redis_url: str) -> RedisEventBus:
+        """Create Redis Event Bus instance."""
+        return RedisEventBus(
+            redis_url=redis_url,
+            max_retries=2,
+            retry_delay=0.1,  # Fast retries for testing
+            consumer_group="test-group",
+        )
+
+    @pytest.fixture
+    def sample_event(self) -> Event:
+        """Create sample event for testing."""
+        return Event(
+            id=str(uuid4()),
+            type="test.event",
+            source="test_service",
+            timestamp=datetime.now(),
+            data={"test_key": "test_value", "number": 42},
+        )
+
+    @pytest.fixture
+    def mock_redis(self) -> AsyncMock:
+        """Create mock Redis client."""
+        mock = AsyncMock(spec=redis.Redis)
+        mock.ping = AsyncMock(return_value=True)
+        mock.xadd = AsyncMock(return_value=b"1234567890-0")
+        mock.xgroup_create = AsyncMock(return_value=True)
+        mock.xreadgroup = AsyncMock(return_value=[])
+        mock.xack = AsyncMock(return_value=1)
+        mock.close = AsyncMock()
+        return mock
+
+    async def test_initialization_success(self, event_bus: RedisEventBus, mock_redis: AsyncMock):
+        """Test successful initialization."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            result = await event_bus.initialize()
+            assert result is True
+            assert event_bus._initialized is True
+            mock_redis.ping.assert_called_once()
+
+    async def test_initialization_failure(self, event_bus: RedisEventBus):
+        """Test initialization failure."""
+        with patch("redis.asyncio.from_url", side_effect=redis.RedisError("Connection failed")):
+            result = await event_bus.initialize()
+            assert result is False
+            assert event_bus._initialized is False
+
+    async def test_health_check_healthy(self, event_bus: RedisEventBus, mock_redis: AsyncMock):
+        """Test health check when Redis is healthy."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+            health = await event_bus.health_check()
+            assert health is True
+
+    async def test_health_check_unhealthy(self, event_bus: RedisEventBus, mock_redis: AsyncMock):
+        """Test health check when Redis is unhealthy."""
+        mock_redis.ping.side_effect = redis.RedisError("Connection lost")
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+            health = await event_bus.health_check()
+            assert health is False
+
+    async def test_health_check_not_initialized(self, event_bus: RedisEventBus):
+        """Test health check when not initialized."""
+        health = await event_bus.health_check()
+        assert health is False
+
+    async def test_publish_success(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test successful event publishing."""
+        expected_message_id = b"1234567890-0"
+        mock_redis.xadd.return_value = expected_message_id
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+            result = await event_bus.publish(sample_event)
+
+            assert isinstance(result, PublishResult)
+            assert result.success is True
+            assert result.event_id == sample_event.id
+            assert result.message_id == str(expected_message_id)
+
+            # Verify Redis call
+            mock_redis.xadd.assert_called_once()
+            call_args = mock_redis.xadd.call_args
+            stream_name = call_args[0][0]
+            event_data = call_args[0][1]
+
+            assert stream_name == f"events:{sample_event.type}"
+            assert event_data["id"] == sample_event.id
+            assert event_data["type"] == sample_event.type
+
+    async def test_publish_not_initialized(self, event_bus: RedisEventBus, sample_event: Event):
+        """Test publishing when not initialized."""
+        result = await event_bus.publish(sample_event)
+        assert result.success is False
+        assert "not initialized" in result.error
+
+    async def test_publish_redis_error(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test publishing with Redis error."""
+        mock_redis.xadd.side_effect = redis.RedisError("Stream error")
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+            result = await event_bus.publish(sample_event)
+
+            assert result.success is False
+            assert "Stream error" in result.error
+
+    async def test_subscribe_success(self, event_bus: RedisEventBus, mock_redis: AsyncMock):
+        """Test successful subscription."""
+        mock_redis.xgroup_create.return_value = True
+
+        async def test_handler(event: Event) -> None:
+            pass
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            with patch.object(event_bus, "_consume_events") as mock_consume:
+                # Mock the consumer task to avoid infinite loop
+                mock_consume.return_value = None
+
+                await event_bus.initialize()
+                subscription_id = await event_bus.subscribe("test.event", test_handler)
+
+                assert isinstance(subscription_id, SubscriptionId)
+                assert subscription_id.id is not None
+
+                # Verify consumer group creation
+                mock_redis.xgroup_create.assert_called_once_with(
+                    "events:test.event", event_bus.consumer_group, id="0", mkstream=True
+                )
+
+    async def test_subscribe_not_initialized(self, event_bus: RedisEventBus):
+        """Test subscription when not initialized."""
+
+        async def test_handler(event: Event) -> None:
+            pass
+
+        with pytest.raises(EventSubscriptionError, match="not initialized"):
+            await event_bus.subscribe("test.event", test_handler)
+
+    async def test_subscribe_existing_consumer_group(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test subscription with existing consumer group."""
+        # Simulate BUSYGROUP error for existing consumer group
+        mock_redis.xgroup_create.side_effect = redis.ResponseError(
+            "BUSYGROUP Consumer Group name already exists"
+        )
+
+        async def test_handler(event: Event) -> None:
+            pass
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            with patch.object(event_bus, "_consume_events") as mock_consume:
+                # Mock the consumer task to avoid infinite loop
+                mock_consume.return_value = None
+
+                await event_bus.initialize()
+                subscription_id = await event_bus.subscribe("test.event", test_handler)
+
+                assert isinstance(subscription_id, SubscriptionId)
+
+    async def test_unsubscribe(self, event_bus: RedisEventBus):
+        """Test unsubscription."""
+        subscription_id = SubscriptionId(id="test-subscription")
+        result = await event_bus.unsubscribe(subscription_id)
+        assert result is True
+
+    async def test_cleanup(self, event_bus: RedisEventBus, mock_redis: AsyncMock):
+        """Test cleanup functionality."""
+        import asyncio
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            # Create a real task that we can cancel
+            async def dummy_consumer():
+                try:
+                    await asyncio.sleep(10)  # Long sleep, will be cancelled
+                except asyncio.CancelledError:
+                    pass
+
+            # Create actual task for cleanup testing
+            task = asyncio.create_task(dummy_consumer())
+            event_bus._running_consumers["test"] = task
+
+            await event_bus.initialize()
+            await event_bus.cleanup()
+
+            assert event_bus._initialized is False
+            assert event_bus._redis is None
+            assert len(event_bus._running_consumers) == 0
+            mock_redis.close.assert_called_once()
+            assert task.cancelled() or task.done()
+
+    async def test_serialize_event(self, event_bus: RedisEventBus, sample_event: Event):
+        """Test event serialization."""
+        serialized = event_bus._serialize_event(sample_event)
+
+        assert isinstance(serialized, dict)
+        assert serialized["id"] == sample_event.id
+        assert serialized["type"] == sample_event.type
+        assert serialized["source"] == sample_event.source
+        assert serialized["timestamp"] == sample_event.timestamp.isoformat()
+        assert json.loads(serialized["data"]) == sample_event.data
+        assert serialized["version"] == sample_event.version
+
+    async def test_serialize_event_error(self, event_bus: RedisEventBus):
+        """Test event serialization error."""
+        # Create event with non-serializable data
+        bad_event = Event(
+            id="test",
+            type="test.event",
+            source="test",
+            timestamp=datetime.now(),
+            data={"bad": object()},  # Non-serializable object
+        )
+
+        with pytest.raises(RedisSerializationError):
+            event_bus._serialize_event(bad_event)
+
+    async def test_deserialize_event(self, event_bus: RedisEventBus, sample_event: Event):
+        """Test event deserialization."""
+        # First serialize the event
+        serialized = event_bus._serialize_event(sample_event)
+
+        # Convert to bytes format as Redis would return
+        message_data = {k.encode(): v.encode() for k, v in serialized.items()}
+
+        # Deserialize
+        deserialized = event_bus._deserialize_event(message_data)
+
+        assert deserialized.id == sample_event.id
+        assert deserialized.type == sample_event.type
+        assert deserialized.source == sample_event.source
+        assert deserialized.data == sample_event.data
+        assert deserialized.version == sample_event.version
+
+    async def test_deserialize_event_error(self, event_bus: RedisEventBus):
+        """Test event deserialization error."""
+        # Invalid message data
+        bad_data = {b"invalid": b"data"}
+
+        with pytest.raises(RedisSerializationError):
+            event_bus._deserialize_event(bad_data)
+
+    async def test_connect_with_retry_success(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test successful connection with retry."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus._connect_with_retry()
+            assert event_bus._redis is not None
+            mock_redis.ping.assert_called_once()
+
+    async def test_connect_with_retry_failure(self, event_bus: RedisEventBus):
+        """Test connection failure after retries."""
+        with patch("redis.asyncio.from_url", side_effect=redis.RedisError("Connection failed")):
+            with pytest.raises(RedisConnectionError):
+                await event_bus._connect_with_retry()
+
+    async def test_circuit_breaker_integration(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test circuit breaker integration."""
+        # Simulate circuit breaker being open
+        event_bus.circuit_breaker._state = event_bus.circuit_breaker._state.OPEN
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Health check should fail when circuit breaker is open
+            with patch.object(
+                event_bus.circuit_breaker, "call", side_effect=CircuitBreakerError("Circuit open")
+            ):
+                health = await event_bus.health_check()
+                assert health is False
+
+    @pytest.mark.asyncio
+    async def test_consumer_event_processing(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test event consumer processing logic components."""
+        processed_events = []
+
+        async def test_handler(event: Event) -> None:
+            processed_events.append(event)
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Test event serialization and deserialization
+            serialized_event = event_bus._serialize_event(sample_event)
+            assert "id" in serialized_event
+            assert "type" in serialized_event
+
+            deserialized_event = event_bus._deserialize_event(serialized_event)
+            assert deserialized_event.id == sample_event.id
+            assert deserialized_event.type == sample_event.type
+
+            # Test handler execution directly
+            await test_handler(deserialized_event)
+
+            # Verify processing
+            assert len(processed_events) == 1
+            assert processed_events[0].id == sample_event.id
+            assert processed_events[0].type == sample_event.type
+
+    @pytest.mark.asyncio
+    async def test_dlq_functionality(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test Dead Letter Queue functionality."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Test move to DLQ
+            await event_bus._move_to_dlq(sample_event, "Test error")
+
+            # Verify DLQ stream was called
+            expected_stream = f"dlq:{sample_event.type}"
+            mock_redis.xadd.assert_called()
+            args, kwargs = mock_redis.xadd.call_args
+            assert args[0] == expected_stream
+            assert "dlq_error" in args[1]
+            assert args[1]["dlq_error"] == "Test error"
+
+    @pytest.mark.asyncio
+    async def test_dlq_no_redis_connection(
+        self, event_bus: RedisEventBus, sample_event: Event
+    ):
+        """Test DLQ when Redis not connected."""
+        # Don't initialize, so _redis is None
+        await event_bus._move_to_dlq(sample_event, "Test error")
+        # Should not raise an exception
+
+    @pytest.mark.asyncio
+    async def test_should_move_to_dlq_no_redis(self, event_bus: RedisEventBus):
+        """Test should_move_to_dlq when Redis not connected."""
+        result = await event_bus._should_move_to_dlq("test-id", "test.event")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_should_move_to_dlq_with_pending_messages(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test should_move_to_dlq with pending messages."""
+        import asyncio
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Create async coroutines for the mock returns
+            async def high_delivery_count():
+                return [{"times_delivered": 5}]
+
+            async def low_delivery_count():
+                return [{"times_delivered": 1}]
+
+            # Mock pending message with high delivery count
+            mock_redis.xpending_range.return_value = high_delivery_count()
+
+            result = await event_bus._should_move_to_dlq("test-id", "test.event")
+            assert result is True
+
+            # Mock pending message with low delivery count
+            mock_redis.xpending_range.return_value = low_delivery_count()
+
+            result = await event_bus._should_move_to_dlq("test-id", "test.event")
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_should_move_to_dlq_exception(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test should_move_to_dlq when exception occurs."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Mock exception
+            mock_redis.xpending_range.side_effect = Exception("Redis error")
+
+            result = await event_bus._should_move_to_dlq("test-id", "test.event")
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_connect_with_retry_max_retries(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test connection retry reaches max retries."""
+        mock_redis.ping.side_effect = redis.ConnectionError("Connection failed")
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            with pytest.raises(RedisConnectionError, match="Failed to connect to Redis after retries"):
+                await event_bus._connect_with_retry()
+
+    @pytest.mark.asyncio
+    async def test_dlq_move_exception(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test DLQ move when exception occurs."""
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Mock exception in xadd
+            mock_redis.xadd.side_effect = Exception("Redis error")
+
+            # Should not raise, just log error
+            await event_bus._move_to_dlq(sample_event, "Test error")
+
+    @pytest.mark.asyncio
+    async def test_subscribe_failure(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test subscription failure due to Redis error."""
+        # Simulate non-BUSYGROUP error
+        mock_redis.xgroup_create.side_effect = redis.ResponseError("Different error")
+
+        async def test_handler(event: Event) -> None:
+            pass
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            with pytest.raises(EventSubscriptionError, match="Subscription failed"):
+                await event_bus.subscribe("test.event", test_handler)
+
+    @pytest.mark.asyncio
+    async def test_subscribe_general_exception(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test subscription failure due to general exception."""
+        # Simulate general exception
+        mock_redis.xgroup_create.side_effect = Exception("Unexpected error")
+
+        async def test_handler(event: Event) -> None:
+            pass
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            with pytest.raises(EventSubscriptionError, match="Subscription failed"):
+                await event_bus.subscribe("test.event", test_handler)
+
+    @pytest.mark.asyncio
+    async def test_consumer_loop_with_messages(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test consumer loop processing messages."""
+        import asyncio
+        
+        processed_events = []
+
+        async def test_handler(event: Event) -> None:
+            processed_events.append(event)
+
+        # Setup message data
+        serialized_event = event_bus._serialize_event(sample_event)
+        message_data = {k.encode(): v.encode() for k, v in serialized_event.items()}
+
+        # Mock Redis responses: first call has message, second call raises CancelledError
+        async def mock_xreadgroup(*args, **kwargs):
+            if not hasattr(mock_xreadgroup, 'called'):
+                mock_xreadgroup.called = True
+                return [(b"events:test.event", [(b"1234567890-0", message_data)])]
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+            event_bus._subscriptions["test.event"] = [test_handler]
+
+            # Run consumer loop briefly
+            try:
+                await event_bus._consume_events("test.event", "events:test.event")
+            except asyncio.CancelledError:
+                pass
+
+            # Verify message was processed
+            assert len(processed_events) == 1
+            assert processed_events[0].id == sample_event.id
+            mock_redis.xack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_consumer_loop_dlq_error_recovery(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock, sample_event: Event
+    ):
+        """Test consumer loop DLQ error handling and recovery."""
+        import asyncio
+
+        # Setup message data
+        serialized_event = event_bus._serialize_event(sample_event)
+        message_data = {k.encode(): v.encode() for k, v in serialized_event.items()}
+
+        # Mock Redis responses
+        async def mock_xreadgroup(*args, **kwargs):
+            if not hasattr(mock_xreadgroup, 'called'):
+                mock_xreadgroup.called = True
+                return [(b"events:test.event", [(b"1234567890-0", message_data)])]
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+
+        # Mock should_move_to_dlq to return True
+        async def mock_should_move_to_dlq(*args):
+            return True
+
+        # Mock _move_to_dlq to raise exception
+        async def mock_move_to_dlq_error(*args):
+            raise Exception("DLQ move failed")
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            with patch.object(event_bus, '_should_move_to_dlq', side_effect=mock_should_move_to_dlq):
+                with patch.object(event_bus, '_move_to_dlq', side_effect=mock_move_to_dlq_error):
+                    # Run consumer loop briefly
+                    try:
+                        await event_bus._consume_events("test.event", "events:test.event")
+                    except asyncio.CancelledError:
+                        pass
+
+                    # Should handle DLQ error gracefully
+
+    @pytest.mark.asyncio
+    async def test_consumer_loop_uninitialized_stop(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test consumer loop stops when event bus is uninitialized."""
+        import asyncio
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Set initialized to False to trigger loop exit
+            async def mock_xreadgroup(*args, **kwargs):
+                if not hasattr(mock_xreadgroup, 'called'):
+                    mock_xreadgroup.called = True
+                    event_bus._initialized = False  # Trigger loop exit
+                    return []
+                else:
+                    raise asyncio.CancelledError()
+
+            mock_redis.xreadgroup.side_effect = mock_xreadgroup
+
+            # Run consumer loop
+            await event_bus._consume_events("test.event", "events:test.event")
+
+            # Loop should exit gracefully when _initialized becomes False
+
+    @pytest.mark.asyncio
+    async def test_consumer_loop_sleep_on_error(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test consumer loop sleeps on error to prevent tight loop."""
+        import asyncio
+
+        call_count = 0
+        
+        async def mock_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Redis error")
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            await event_bus.initialize()
+
+            # Mock asyncio.sleep to verify it's called
+            with patch("asyncio.sleep", return_value=None) as mock_sleep:
+                try:
+                    await event_bus._consume_events("test.event", "events:test.event")
+                except asyncio.CancelledError:
+                    pass
+
+                # Verify sleep was called after error
+                mock_sleep.assert_called_once_with(1)
+
+
+class TestRedisEventBusErrors:
+    """Test error scenarios for Redis Event Bus."""
+
+    @pytest.mark.asyncio
+    async def test_handler_error_dlq_move_scenario(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test handler error with DLQ move scenario."""
+        import json
+        from datetime import datetime
+        from xline.core.events.event import Event
+
+        # Create test event
+        class TestHandlerEvent(Event):
+            data: str
+
+        event = TestHandlerEvent(id="test-handler-error", data="test")
+        message_id = b"1234567890-0"
+        
+        # Serialize event data
+        fields = {
+            b"id": event.id.encode(),
+            b"event_type": "TestHandlerEvent",
+            b"data": json.dumps({"data": event.data}).encode(),
+            b"timestamp": datetime.now().isoformat().encode(),
+        }
+
+        # Create failing handler
+        handler_calls = []
+        
+        async def failing_handler(e):
+            handler_calls.append(e)
+            raise ValueError("Handler processing failed")
+        
+        # Setup event bus
+        event_bus._subscriptions["TestHandlerEvent"] = [failing_handler]
+
+        call_count = 0
+        
+        async def mock_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [(b"events:TestHandlerEvent", [(message_id, fields)])]
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+        mock_redis.xack = AsyncMock()
+
+        # Mock DLQ behavior - return True to trigger DLQ move
+        with patch.object(event_bus, "_should_move_to_dlq", return_value=True), 
+             patch.object(event_bus, "_move_to_dlq") as mock_move_dlq, 
+             patch("redis.asyncio.from_url", return_value=mock_redis):
+            
+            await event_bus.initialize()
+            
+            try:
+                await event_bus._consume_events("TestHandlerEvent", "events:TestHandlerEvent")
+            except asyncio.CancelledError:
+                pass
+
+            # Verify handler was called and failed
+            assert len(handler_calls) == 1
+            assert handler_calls[0].data == "test"
+            
+            # Verify DLQ move was called
+            mock_move_dlq.assert_called_once()
+            
+            # Verify message was acknowledged after DLQ move
+            mock_redis.xack.assert_called_once_with(
+                "events:TestHandlerEvent", event_bus.consumer_group, message_id
+            )
+
+    @pytest.mark.asyncio
+    async def test_dlq_serialization_error_scenario(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test DLQ move with serialization error scenario."""
+        message_id = b"1234567890-0"
+        
+        # Invalid fields that will cause deserialization to fail
+        invalid_fields = {
+            b"invalid": b"data",
+            b"bad_format": b"test"
+        }
+
+        call_count = 0
+        
+        async def mock_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [(b"events:test.event", [(message_id, invalid_fields)])]
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+        mock_redis.xack = AsyncMock()
+
+        # Mock DLQ behavior
+        with patch.object(event_bus, "_should_move_to_dlq", return_value=True), 
+             patch.object(event_bus, "_move_to_dlq") as mock_move_dlq, 
+             patch("redis.asyncio.from_url", return_value=mock_redis):
+            
+            await event_bus.initialize()
+            
+            try:
+                await event_bus._consume_events("test.event", "events:test.event")
+            except asyncio.CancelledError:
+                pass
+
+            # Verify DLQ move was NOT called due to serialization failure
+            mock_move_dlq.assert_not_called()
+            
+            # Verify message was NOT acknowledged due to DLQ failure
+            mock_redis.xack.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_processing_error_with_successful_dlq_recovery(
+        self, event_bus: RedisEventBus, mock_redis: AsyncMock
+    ):
+        """Test processing error with successful DLQ recovery."""
+        import json
+        from datetime import datetime
+        from xline.core.events.event import Event
+
+        # Create test event
+        class TestProcessingEvent(Event):
+            data: str
+
+        event = TestProcessingEvent(id="test-processing-error", data="test")
+        message_id = b"1234567890-0"
+        
+        # Create fields that will cause processing error but can be serialized for DLQ
+        fields = {
+            b"id": event.id.encode(),
+            b"event_type": "TestProcessingEvent", 
+            b"data": json.dumps({"data": event.data}).encode(),
+            b"timestamp": datetime.now().isoformat().encode(),
+        }
+
+        call_count = 0
+        
+        async def mock_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [(b"events:TestProcessingEvent", [(message_id, fields)])]
+            else:
+                raise asyncio.CancelledError()
+
+        mock_redis.xreadgroup.side_effect = mock_xreadgroup
+        mock_redis.xack = AsyncMock()
+
+        # Force processing error by not having any subscriptions
+        event_bus._subscriptions = {}
+
+        # Mock DLQ behavior to simulate successful DLQ operation
+        with patch.object(event_bus, "_should_move_to_dlq", return_value=True), 
+             patch.object(event_bus, "_move_to_dlq") as mock_move_dlq, 
+             patch("redis.asyncio.from_url", return_value=mock_redis):
+            
+            await event_bus.initialize()
+            
+            try:
+                await event_bus._consume_events("TestProcessingEvent", "events:TestProcessingEvent") 
+            except asyncio.CancelledError:
+                pass
+
+            # Verify DLQ move was called for processing error
+            mock_move_dlq.assert_called_once()
+            
+            # Verify message was acknowledged after successful DLQ move
+            mock_redis.xack.assert_called_once_with(
+                "events:TestProcessingEvent", event_bus.consumer_group, message_id
+            )
+
+    def test_redis_connection_error(self):
+        """Test RedisConnectionError."""
+        error = RedisConnectionError("Connection failed")
+        assert str(error) == "Connection failed"
+        assert isinstance(error, Exception)
+
+    def test_redis_serialization_error(self):
+        """Test RedisSerializationError."""
+        error = RedisSerializationError("Serialization failed")
+        assert str(error) == "Serialization failed"
+        assert isinstance(error, Exception)

@@ -1,4 +1,1 @@
-"""
-Core system components for Xline Enterprise.
-Contains fundamental architecture patterns and interfaces.
-"""
+"""Xline Core Events Module - Protocol Interfaces and Data Structures."""

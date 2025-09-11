@@ -1,7 +1,4 @@
-"""
-Xline Enterprise Trading System
-Advanced crypto auto trading system based on Freqtrade with enterprise features.
-"""
+"""Xline Core - Enterprise Trading System."""
 
 __version__ = "0.1.0"
-__author__ = "XlineV2 Team"
+__author__ = "Xline Development Team"

@@ -56,10 +56,12 @@ class BaseRegressionModel(IFreqaiModel):
         dk.feature_pipeline = self.define_data_pipeline(threads=dk.thread_count)
         dk.label_pipeline = self.define_label_pipeline(threads=dk.thread_count)
 
-        (dd["train_features"], dd["train_labels"], dd["train_weights"]) = (
-            dk.feature_pipeline.fit_transform(
-                dd["train_features"], dd["train_labels"], dd["train_weights"]
-            )
+        (
+            dd["train_features"],
+            dd["train_labels"],
+            dd["train_weights"],
+        ) = dk.feature_pipeline.fit_transform(
+            dd["train_features"], dd["train_labels"], dd["train_weights"]
         )
         dd["train_labels"], _, _ = dk.label_pipeline.fit_transform(dd["train_labels"])
 
@@ -71,10 +73,12 @@ class BaseRegressionModel(IFreqaiModel):
                     f"Try reducing 'test_size' or relaxing your SVM conditions."
                 )
             else:
-                (dd["test_features"], dd["test_labels"], dd["test_weights"]) = (
-                    dk.feature_pipeline.transform(
-                        dd["test_features"], dd["test_labels"], dd["test_weights"]
-                    )
+                (
+                    dd["test_features"],
+                    dd["test_labels"],
+                    dd["test_weights"],
+                ) = dk.feature_pipeline.transform(
+                    dd["test_features"], dd["test_labels"], dd["test_weights"]
                 )
                 dd["test_labels"], _, _ = dk.label_pipeline.transform(dd["test_labels"])
 
